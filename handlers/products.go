@@ -1,11 +1,12 @@
 package handlers
 
 import (
+	"context"
 	"log"
 	"net/http"
-	"regexp"
 	"strconv"
 
+	"github.com/gorilla/mux"
 	"github.com/pyadav/microservice/data"
 )
 
@@ -19,45 +20,8 @@ func NewProducts(l *log.Logger) *Products {
 	return &Products{l}
 }
 
-// ServeHTTP is a main entry point for the handler and stisfies the http.Handler
-// interface
-func (h *Products) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method == http.MethodGet {
-		h.getProducts(w, r)
-		return
-	}
-
-	if r.Method == http.MethodPost {
-		h.addProducts(w, r)
-		return
-	}
-
-	if r.Method == http.MethodPut {
-		// except id in the URI
-		regex := regexp.MustCompile(`/([0-9]+)`)
-		matches := regex.FindAllStringSubmatch(r.URL.Path, -1)
-
-		if len(matches) != 1 {
-			http.Error(w, "Invalid URI", http.StatusBadRequest)
-			return
-		}
-
-		matchString := matches[0][1]
-		id, err := strconv.Atoi(matchString)
-		if err != nil {
-			http.Error(w, "Invalid URI", http.StatusBadRequest)
-			return
-		}
-
-		h.updateProduct(id, w, r)
-	}
-
-	// catch all
-	w.WriteHeader(http.StatusMethodNotAllowed)
-}
-
-// getProducts return products form the data stores
-func (h *Products) getProducts(w http.ResponseWriter, r *http.Request) {
+// GetProducts return products form the data stores
+func (p *Products) GetProducts(w http.ResponseWriter, r *http.Request) {
 	productsList := data.GetProducts()
 
 	if err := productsList.ToJSON(w); err != nil {
@@ -65,28 +29,26 @@ func (h *Products) getProducts(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// addProducts add product into the data stores
-func (h *Products) addProducts(w http.ResponseWriter, r *http.Request) {
-	h.logger.Println("Add a product")
+// AddProduct add product into the data stores
+func (p *Products) AddProduct(w http.ResponseWriter, r *http.Request) {
+	p.logger.Println("Add a product")
 
-	product := &data.Product{}
-	if err := product.FromJSON(r.Body); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-	}
-
-	data.AddProduct(product)
+	product := r.Context().Value(KeyProduct{}).(data.Product)
+	data.AddProduct(&product)
 }
 
-// updateProduct will update info of a product
-func (h *Products) updateProduct(id int, w http.ResponseWriter, r *http.Request) {
-	h.logger.Println("update a product")
-
-	product := &data.Product{}
-	if err := product.FromJSON(r.Body); err != nil {
+// UpdateProduct will update info of a product
+func (p Products) UpdateProduct(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	id, err := strconv.Atoi(vars["id"])
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
-	err := data.UpdateProduct(id, product)
+	product := r.Context().Value(KeyProduct{}).(data.Product)
+
+	err = data.UpdateProduct(id, &product)
 	if err == data.ErrProductNotFound {
 		http.Error(w, "Product not found", http.StatusNotFound)
 		return
@@ -96,4 +58,28 @@ func (h *Products) updateProduct(id int, w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+}
+
+// KeyProduct ...
+type KeyProduct struct{}
+
+// MiddlewareValidateProduct ...
+func (p Products) MiddlewareValidateProduct(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		prod := data.Product{}
+
+		err := prod.FromJSON(r.Body)
+		if err != nil {
+			p.logger.Println("[ERROR] deserializing product", err)
+			http.Error(rw, "Error reading product", http.StatusBadRequest)
+			return
+		}
+
+		// add the product to the context
+		ctx := context.WithValue(r.Context(), KeyProduct{}, prod)
+		r = r.WithContext(ctx)
+
+		// Call the next handler, which can be another middleware in the chain, or the final handler.
+		next.ServeHTTP(rw, r)
+	})
 }
